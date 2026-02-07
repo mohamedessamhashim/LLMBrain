@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(du -sh:*)",
+      "Bash(tree:*)",
+      "Bash(python -c:*)",
+      "Bash(python scripts/generate_prompts.py:*)"
+    ]
+  }
+}

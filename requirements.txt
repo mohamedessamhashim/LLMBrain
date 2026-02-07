@@ -1,0 +1,23 @@
+# Core dependencies
+torch>=2.0.0
+monai>=1.3.0
+nibabel>=5.0.0
+SimpleITK>=2.2.0
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+scipy>=1.10.0
+pyyaml>=6.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+tqdm>=4.65.0
+tensorboard>=2.13.0
+
+# LLM dependencies (LLaMA 3B + cross-attention)
+transformers>=4.36.0
+accelerate>=0.25.0
+bitsandbytes>=0.41.0     # 4-bit / 8-bit quantization
+sentencepiece>=0.1.99
+
+# For preprocessing (optional)
+# HD-BET  # pip install git+https://github.com/MIC-DKFZ/HD-BET.git

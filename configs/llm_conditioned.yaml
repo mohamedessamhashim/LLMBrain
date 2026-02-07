@@ -1,0 +1,44 @@
+# LLMBrain LLM-Conditioned Configuration
+# Swin UNETR + LLaMA 3B Cross-Attention for Brain Tumor Segmentation
+
+# Data paths
+data:
+  data_dir: "./data/raw"             # Raw UCSF-PDGM data (auto-detected layout)
+  prompts_csv: "./data/prompts.csv"
+  val_split: 0.2
+
+# Segmentation model (Swin UNETR with cross-attention)
+model:
+  name: "llm_conditioned_swin_unetr"
+  in_channels: 4            # T1, T1ce, T2, FLAIR
+  out_channels: 4           # BG, NCR, ED, ET
+  feature_size: 48
+  img_size: [96, 96, 96]
+  pretrained: true           # "full" (encoder+decoder), "encoder" (encoder only), or false
+  use_checkpoint: false      # Enable for memory-constrained training
+  cross_attn_heads: 8
+  cross_attn_dropout: 0.1
+
+# LLM configuration (LLaMA 3B)
+llm:
+  enabled: true
+  model_name: "meta-llama/Llama-3.2-3B"
+  freeze: true               # Freeze LLM weights (recommended)
+  pooling: "last"            # Pooling strategy: last | mean | cls
+  load_in_4bit: true         # NF4 quantization for memory efficiency
+  load_in_8bit: false
+  text_dim: 3072             # LLaMA 3B hidden size
+  projection_dim: null       # null = use raw LLM dim; set to e.g. 512 to project
+
+# Training hyperparameters (fine-tuning from pretrained weights)
+training:
+  epochs: 100
+  batch_size: 1              # Smaller batch due to LLM memory
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  val_interval: 5
+  amp: true
+  num_workers: 4
+
+# Output directory
+output_dir: "./outputs/llm_conditioned"
