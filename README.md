@@ -52,8 +52,6 @@ huggingface-cli login
 ### 2. Download Data
 Download UCSF-PDGM from TCIA and place in `data/raw/`:
 - **Access Request**: https://www.cancerimagingarchive.net/collection/ucsf-pdgm/
-- **Download Tool**: [NBIA Data Retriever](https://wiki.cancerimagingarchive.net/display/NBIA/Downloading+TCIA+Images)
-- **Direct Link**: https://doi.org/10.7937/tcia.709x-dn49
 
 The dataset loader auto-detects both raw and preprocessed layouts, so you can train directly on the downloaded data without preprocessing.
 
