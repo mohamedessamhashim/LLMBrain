@@ -60,8 +60,8 @@ The dataset loader auto-detects both raw and preprocessed layouts, so you can tr
 python scripts/generate_prompts.py --csv data/UCSF-PDGM-metadata_v5.csv --output data/prompts.csv
 ```
 
-### 4. (Optional) Preprocess Data
-Preprocessing is **optional** — the pipeline works directly on raw NIfTI files. If you want cleaner inputs:
+### 4. Preprocess Data
+Preprocessing is **optional**, the pipeline works directly on raw NIfTI files:
 ```bash
 python scripts/preprocess.py --input_dir data/raw/UCSF-PDGM --output_dir data/processed
 ```
@@ -131,8 +131,7 @@ LLMBrain/
 │   ├── raw/                        # Downloaded UCSF-PDGM data
 │   ├── processed/                  # After preprocessing
 │   └── prompts.csv                 # Generated clinical prompts
-├── outputs/                        # Training outputs (gitignored)
-└── archive/                        # Archived old code
+└── outputs/                        # Training outputs (gitignored)
 ```
 
 ---
