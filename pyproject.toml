@@ -56,7 +56,7 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-org/LLMBrain"
+Homepage = "https://github.com/mohamedessamhashim/LLMBrain"
 
 [tool.setuptools.packages.find]
 where = ["src"]
