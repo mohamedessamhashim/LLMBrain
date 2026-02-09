@@ -215,13 +215,14 @@ class LLaMAEncoder(nn.Module):
 class CachedLLMEncoder(LLaMAEncoder):
     """LLM Encoder with embedding caching for efficiency.
 
-    Caches computed embeddings to avoid redundant computation
-    during training when the same prompts are used repeatedly.
+    Caches both pooled and sequence embeddings to avoid redundant
+    computation during training when the same prompts appear repeatedly.
     """
 
     def __init__(self, *args, cache_size: int = 1000, **kwargs):
         super().__init__(*args, **kwargs)
         self.cache = {}
+        self.seq_cache = {}
         self.cache_size = cache_size
 
     def encode_text(
@@ -230,7 +231,6 @@ class CachedLLMEncoder(LLaMAEncoder):
         max_length: int = 128,
     ) -> torch.Tensor:
         """Encode with caching."""
-        # Check cache
         cache_keys = [f"{t}_{max_length}" for t in texts]
         cached_indices = []
         uncached_indices = []
@@ -244,11 +244,11 @@ class CachedLLMEncoder(LLaMAEncoder):
                 uncached_texts.append(text)
 
         # Compute uncached embeddings
+        new_embeddings = None
         if uncached_texts:
             new_embeddings = super().encode_text(uncached_texts, max_length)
 
-            # Update cache
-            for i, (text, key) in enumerate(zip(uncached_texts, [cache_keys[j] for j in uncached_indices])):
+            for i, key in enumerate([cache_keys[j] for j in uncached_indices]):
                 if len(self.cache) < self.cache_size:
                     self.cache[key] = new_embeddings[i].detach().cpu()
 
@@ -256,13 +256,64 @@ class CachedLLMEncoder(LLaMAEncoder):
         embeddings = torch.zeros(len(texts), self.output_dim, device=self.llm.device)
 
         for i, idx in enumerate(uncached_indices):
-            embeddings[idx] = new_embeddings[i] if uncached_texts else None
+            if new_embeddings is not None:
+                embeddings[idx] = new_embeddings[i]
 
         for idx in cached_indices:
             embeddings[idx] = self.cache[cache_keys[idx]].to(self.llm.device)
 
         return embeddings
 
+    def get_sequence_embeddings(
+        self,
+        texts: List[str],
+        max_length: int = 128,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Get full sequence embeddings with caching.
+
+        Caches (hidden_states, attention_mask) per prompt to avoid
+        redundant LLM forward passes across epochs.
+        """
+        cache_keys = [f"seq_{t}_{max_length}" for t in texts]
+
+        # Check if ALL texts are cached (sequence lengths must match for stacking)
+        all_cached = all(k in self.seq_cache for k in cache_keys)
+
+        if all_cached:
+            hidden_list = []
+            mask_list = []
+            for key in cache_keys:
+                h, m = self.seq_cache[key]
+                hidden_list.append(h.to(self.llm.device))
+                mask_list.append(m.to(self.llm.device))
+            # Pad to same sequence length before stacking
+            max_seq = max(h.shape[0] for h in hidden_list)
+            padded_hidden = []
+            padded_mask = []
+            for h, m in zip(hidden_list, mask_list):
+                pad_len = max_seq - h.shape[0]
+                if pad_len > 0:
+                    h = torch.nn.functional.pad(h, (0, 0, 0, pad_len))
+                    m = torch.nn.functional.pad(m, (0, pad_len))
+                padded_hidden.append(h)
+                padded_mask.append(m)
+            return torch.stack(padded_hidden), torch.stack(padded_mask)
+
+        # Compute all (can't mix cached/uncached easily for sequences)
+        hidden_states, attention_mask = super().get_sequence_embeddings(texts, max_length)
+
+        # Cache individual results
+        for i, key in enumerate(cache_keys):
+            if key not in self.seq_cache and len(self.seq_cache) < self.cache_size:
+                seq_len = int(attention_mask[i].sum().item())
+                self.seq_cache[key] = (
+                    hidden_states[i, :seq_len].detach().cpu(),
+                    attention_mask[i, :seq_len].detach().cpu(),
+                )
+
+        return hidden_states, attention_mask
+
     def clear_cache(self):
-        """Clear the embedding cache."""
+        """Clear all embedding caches."""
         self.cache.clear()
+        self.seq_cache.clear()
