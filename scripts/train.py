@@ -103,6 +103,7 @@ def main():
             out_channels=model_config.get("out_channels", 4),
             feature_size=model_config.get("feature_size", 48),
             text_dim=text_dim,
+            cross_attn_common_dim=model_config.get("cross_attn_common_dim", 512),
             cross_attn_heads=model_config.get("cross_attn_heads", 8),
             cross_attn_dropout=model_config.get("cross_attn_dropout", 0.1),
             pretrained_vision=model_config.get("pretrained", True),
@@ -125,16 +126,38 @@ def main():
     print(f"Model parameters: {total:,} total, {trainable:,} trainable")
 
     # ---- Loss / Optimizer / Scheduler ----
+    ce_weight_list = training_config.get("ce_weight")
+    ce_weight = torch.tensor(ce_weight_list, dtype=torch.float32) if ce_weight_list else None
+
     loss_fn = get_loss_function(
         loss_type="dice_ce",
         include_background=True,
         to_onehot_y=True,
         softmax=True,
+        ce_weight=ce_weight,
     )
 
+    # Separate parameter groups: adapters (cross-attention + gates) get a higher
+    # learning rate since they are initialised from scratch, while the pretrained
+    # Swin-UNETR backbone uses the base rate.
+    base_lr = training_config.get("learning_rate", 1e-4)
+    adapter_lr = training_config.get("adapter_learning_rate", 5e-4)
+
+    adapter_params = []
+    backbone_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "cross_attn" in name or "gate_param" in name:
+            adapter_params.append(param)
+        else:
+            backbone_params.append(param)
+
     optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=training_config.get("learning_rate", 1e-4),
+        [
+            {"params": backbone_params, "lr": base_lr},
+            {"params": adapter_params, "lr": adapter_lr},
+        ],
         weight_decay=training_config.get("weight_decay", 1e-5),
     )
 
@@ -168,6 +191,8 @@ def main():
         amp=training_config.get("amp", True),
         scheduler=scheduler,
         llm_encoder=llm_encoder,
+        prompt_dropout=training_config.get("prompt_dropout", 0.15),
+        prompt_permutation=training_config.get("prompt_permutation", True),
     )
 
     trainer.train()
