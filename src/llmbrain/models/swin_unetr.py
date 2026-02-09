@@ -148,6 +148,7 @@ class LLMConditionedSwinUNETR(nn.Module):
         out_channels: Number of output classes.
         feature_size: Base feature size for Swin Transformer.
         text_dim: Dimension of LLM text embeddings.
+        cross_attn_common_dim: Dimension of the shared Q/K/V attention space.
         cross_attn_heads: Number of heads in cross-attention.
         cross_attn_dropout: Dropout rate for cross-attention.
         pretrained_vision: Weight loading mode — True/"full" (recommended), "encoder",
@@ -162,6 +163,7 @@ class LLMConditionedSwinUNETR(nn.Module):
         out_channels: int = 4,
         feature_size: int = 48,
         text_dim: int = 3072,
+        cross_attn_common_dim: int = 512,
         cross_attn_heads: int = 8,
         cross_attn_dropout: float = 0.1,
         pretrained_vision: Union[bool, str] = True,
@@ -196,12 +198,12 @@ class LLMConditionedSwinUNETR(nn.Module):
 
         self.cross_attn_layers = nn.ModuleList()
         for ch in decoder_channels:
-            n_heads = max(1, min(cross_attn_heads, ch // 64))
             self.cross_attn_layers.append(
                 SpatialCrossAttention(
                     in_channels=ch,
                     text_dim=text_dim,
-                    num_heads=n_heads,
+                    common_dim=cross_attn_common_dim,
+                    num_heads=cross_attn_heads,
                     dropout=cross_attn_dropout,
                 )
             )
@@ -209,7 +211,7 @@ class LLMConditionedSwinUNETR(nn.Module):
         # Gating parameters: learnable scalars initialised near zero so the
         # model starts close to the pretrained vision-only behaviour.
         self.gate_params = nn.ParameterList([
-            nn.Parameter(torch.zeros(1)) for _ in decoder_channels
+            nn.Parameter(torch.full((1,), -5.0)) for _ in decoder_channels
         ])
 
     def forward(
@@ -314,6 +316,7 @@ def get_llm_conditioned_model(
     out_channels: int = 4,
     feature_size: int = 48,
     text_dim: int = 3072,
+    cross_attn_common_dim: int = 512,
     cross_attn_heads: int = 8,
     cross_attn_dropout: float = 0.1,
     pretrained_vision: Union[bool, str] = True,
@@ -335,6 +338,7 @@ def get_llm_conditioned_model(
         out_channels=out_channels,
         feature_size=feature_size,
         text_dim=text_dim,
+        cross_attn_common_dim=cross_attn_common_dim,
         cross_attn_heads=cross_attn_heads,
         cross_attn_dropout=cross_attn_dropout,
         pretrained_vision=pretrained_vision,
