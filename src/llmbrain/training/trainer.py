@@ -1,5 +1,6 @@
 """Training loop for LLM-conditioned brain tumor segmentation."""
 
+import random
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -10,9 +11,11 @@ from monai.data import DataLoader, decollate_batch
 from monai.inferers import sliding_window_inference
 from monai.metrics import DiceMetric
 from monai.transforms import AsDiscrete
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+
+_GENERIC_PROMPT = "brain MRI"
 
 
 class Trainer:
@@ -52,6 +55,8 @@ class Trainer:
         amp: bool = True,
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         llm_encoder: Optional[nn.Module] = None,
+        prompt_dropout: float = 0.15,
+        prompt_permutation: bool = True,
     ):
         self.model = model.to(device)
         self.loss_fn = loss_fn
@@ -65,6 +70,8 @@ class Trainer:
         self.amp = amp
         self.scheduler = scheduler
         self.llm_encoder = llm_encoder
+        self.prompt_dropout = prompt_dropout
+        self.prompt_permutation = prompt_permutation
 
         # Setup output directories
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -75,7 +82,7 @@ class Trainer:
         self.writer = SummaryWriter(log_dir=str(self.log_dir))
 
         # Mixed precision
-        self.scaler = GradScaler() if amp else None
+        self.scaler = GradScaler(device) if amp else None
 
         # Metrics
         self.dice_metric = DiceMetric(include_background=True, reduction="mean_batch")
@@ -101,6 +108,33 @@ class Trainer:
         text_embeddings, text_mask = self.llm_encoder.get_sequence_embeddings(prompts)
         return text_embeddings, text_mask
 
+    def _augment_prompts(self, prompts: List[str]) -> List[str]:
+        """Apply prompt augmentation during training.
+
+        - Prompt dropout: replace with generic fallback with probability
+          ``self.prompt_dropout`` to prevent over-reliance on text.
+        - Field permutation: randomly shuffle the comma-separated clinical
+          fields to prevent position-dependent attention patterns.
+        """
+        if prompts is None:
+            return prompts
+
+        augmented = []
+        for prompt in prompts:
+            # Prompt dropout
+            if random.random() < self.prompt_dropout:
+                augmented.append(_GENERIC_PROMPT)
+                continue
+
+            # Field permutation
+            if self.prompt_permutation:
+                fields = [f.strip() for f in prompt.split(",")]
+                random.shuffle(fields)
+                prompt = ", ".join(fields)
+
+            augmented.append(prompt)
+        return augmented
+
     # ------------------------------------------------------------------
     # Training
     # ------------------------------------------------------------------
@@ -118,13 +152,14 @@ class Trainer:
             labels = batch_data["label"].to(self.device)
             prompts = batch_data.get("prompt")
 
-            # Encode clinical text
+            # Augment and encode clinical text
+            prompts = self._augment_prompts(prompts)
             text_embeddings, text_mask = self._encode_prompts(prompts)
 
             self.optimizer.zero_grad()
 
             if self.amp:
-                with autocast():
+                with autocast(self.device):
                     if text_embeddings is not None:
                         outputs = self.model(
                             inputs,
@@ -174,17 +209,20 @@ class Trainer:
 
                 text_embeddings, text_mask = self._encode_prompts(prompts)
 
-                # Build predictor for sliding window inference
+                # Build predictor for sliding window inference.
+                # Expand text embeddings to match the sw_batch_size that
+                # sliding_window_inference may use internally.
                 if text_embeddings is not None:
-                    # Closure captures the text embeddings for this sample
                     def _predict(x, te=text_embeddings, tm=text_mask):
-                        return self.model(x, text_embeddings=te, text_mask=tm)
+                        te_exp = te.expand(x.shape[0], -1, -1)
+                        tm_exp = tm.expand(x.shape[0], -1) if tm is not None else None
+                        return self.model(x, text_embeddings=te_exp, text_mask=tm_exp)
                     predictor = _predict
                 else:
                     predictor = self.model
 
                 if self.amp:
-                    with autocast():
+                    with autocast(self.device):
                         outputs = sliding_window_inference(
                             inputs,
                             roi_size=(96, 96, 96),
