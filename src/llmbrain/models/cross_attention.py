@@ -15,9 +15,14 @@ class CrossAttention(nn.Module):
     - Query: Vision features (from Swin UNETR encoder/decoder)
     - Key/Value: Text embeddings (from LLaMA)
 
+    All projections map into a fixed-size common attention space so that
+    text information is not excessively compressed at high-resolution
+    decoder stages.
+
     Args:
         vision_dim: Dimension of vision features.
         text_dim: Dimension of text embeddings.
+        common_dim: Dimension of the shared Q/K/V attention space.
         num_heads: Number of attention heads.
         dropout: Dropout rate.
         bias: Whether to use bias in projections.
@@ -27,6 +32,7 @@ class CrossAttention(nn.Module):
         self,
         vision_dim: int,
         text_dim: int,
+        common_dim: int = 512,
         num_heads: int = 8,
         dropout: float = 0.1,
         bias: bool = True,
@@ -35,20 +41,21 @@ class CrossAttention(nn.Module):
 
         self.vision_dim = vision_dim
         self.text_dim = text_dim
+        self.common_dim = common_dim
         self.num_heads = num_heads
-        self.head_dim = vision_dim // num_heads
+        self.head_dim = common_dim // num_heads
 
-        assert vision_dim % num_heads == 0, "vision_dim must be divisible by num_heads"
+        assert common_dim % num_heads == 0, "common_dim must be divisible by num_heads"
 
-        # Query projection (vision -> attention space)
-        self.q_proj = nn.Linear(vision_dim, vision_dim, bias=bias)
+        # Query projection (vision -> common attention space)
+        self.q_proj = nn.Linear(vision_dim, common_dim, bias=bias)
 
-        # Key and Value projections (text -> attention space)
-        self.k_proj = nn.Linear(text_dim, vision_dim, bias=bias)
-        self.v_proj = nn.Linear(text_dim, vision_dim, bias=bias)
+        # Key and Value projections (text -> common attention space)
+        self.k_proj = nn.Linear(text_dim, common_dim, bias=bias)
+        self.v_proj = nn.Linear(text_dim, common_dim, bias=bias)
 
-        # Output projection
-        self.out_proj = nn.Linear(vision_dim, vision_dim, bias=bias)
+        # Output projection (common attention space -> vision)
+        self.out_proj = nn.Linear(common_dim, vision_dim, bias=bias)
 
         self.dropout = nn.Dropout(dropout)
         self.scale = math.sqrt(self.head_dim)
@@ -79,10 +86,10 @@ class CrossAttention(nn.Module):
         batch_size, num_patches, _ = vision_features.shape
         seq_len = text_embeddings.size(1)
 
-        # Project queries, keys, values
-        Q = self.q_proj(vision_features)  # (B, num_patches, vision_dim)
-        K = self.k_proj(text_embeddings)  # (B, seq_len, vision_dim)
-        V = self.v_proj(text_embeddings)  # (B, seq_len, vision_dim)
+        # Project queries, keys, values into common attention space
+        Q = self.q_proj(vision_features)  # (B, num_patches, common_dim)
+        K = self.k_proj(text_embeddings)  # (B, seq_len, common_dim)
+        V = self.v_proj(text_embeddings)  # (B, seq_len, common_dim)
 
         # Reshape for multi-head attention
         Q = Q.view(batch_size, num_patches, self.num_heads, self.head_dim).transpose(1, 2)
@@ -109,7 +116,7 @@ class CrossAttention(nn.Module):
 
         # Reshape back
         attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(batch_size, num_patches, self.vision_dim)
+        attn_output = attn_output.view(batch_size, num_patches, self.common_dim)
 
         # Output projection
         output = self.out_proj(attn_output)
@@ -129,6 +136,7 @@ class CrossAttentionBlock(nn.Module):
     Args:
         vision_dim: Dimension of vision features.
         text_dim: Dimension of text embeddings.
+        common_dim: Dimension of the shared Q/K/V attention space.
         num_heads: Number of attention heads.
         mlp_ratio: Ratio for MLP hidden dimension.
         dropout: Dropout rate.
@@ -138,6 +146,7 @@ class CrossAttentionBlock(nn.Module):
         self,
         vision_dim: int,
         text_dim: int,
+        common_dim: int = 512,
         num_heads: int = 8,
         mlp_ratio: float = 4.0,
         dropout: float = 0.1,
@@ -148,6 +157,7 @@ class CrossAttentionBlock(nn.Module):
         self.cross_attn = CrossAttention(
             vision_dim=vision_dim,
             text_dim=text_dim,
+            common_dim=common_dim,
             num_heads=num_heads,
             dropout=dropout,
         )
@@ -197,29 +207,50 @@ class SpatialCrossAttention(nn.Module):
     Designed for integration with Swin UNETR decoder stages.
     Handles the spatial dimensions of 3D medical images.
 
+    When the number of spatial tokens (D*H*W) exceeds ``max_tokens``,
+    the features are spatially downsampled with average pooling before
+    cross-attention and then upsampled back.  This keeps memory usage
+    bounded for high-resolution decoder stages.
+
     Args:
         in_channels: Number of input channels.
         text_dim: Dimension of text embeddings.
+        common_dim: Dimension of the shared Q/K/V attention space.
         num_heads: Number of attention heads.
         dropout: Dropout rate.
+        max_tokens: Token count threshold above which spatial downsampling
+            is applied before cross-attention.
     """
 
     def __init__(
         self,
         in_channels: int,
         text_dim: int,
+        common_dim: int = 512,
         num_heads: int = 8,
         dropout: float = 0.1,
+        max_tokens: int = 8192,
     ):
         super().__init__()
 
         self.in_channels = in_channels
+        self.max_tokens = max_tokens
         self.cross_attn_block = CrossAttentionBlock(
             vision_dim=in_channels,
             text_dim=text_dim,
+            common_dim=common_dim,
             num_heads=num_heads,
             dropout=dropout,
         )
+
+    @staticmethod
+    def _pool_factor(num_tokens: int, max_tokens: int) -> int:
+        """Compute the smallest power-of-2 pooling factor that brings
+        ``num_tokens`` under ``max_tokens``."""
+        factor = 1
+        while num_tokens // (factor ** 3) > max_tokens:
+            factor *= 2
+        return factor
 
     def forward(
         self,
@@ -238,15 +269,30 @@ class SpatialCrossAttention(nn.Module):
             Conditioned features with same shape as input.
         """
         B, C, D, H, W = x.shape
+        num_tokens = D * H * W
 
-        # Reshape: (B, C, D, H, W) -> (B, D*H*W, C)
-        x_flat = x.permute(0, 2, 3, 4, 1).reshape(B, D * H * W, C)
+        # Downsample if spatial volume is too large for attention
+        pool_k = self._pool_factor(num_tokens, self.max_tokens) if num_tokens > self.max_tokens else 1
+
+        if pool_k > 1:
+            x_down = F.avg_pool3d(x, kernel_size=pool_k, stride=pool_k)
+            Bd, Cd, Dd, Hd, Wd = x_down.shape
+        else:
+            x_down = x
+            Dd, Hd, Wd = D, H, W
+
+        # Reshape: (B, C, D', H', W') -> (B, D'*H'*W', C)
+        x_flat = x_down.permute(0, 2, 3, 4, 1).reshape(B, Dd * Hd * Wd, C)
 
         # Apply cross-attention
         x_attended = self.cross_attn_block(x_flat, text_embeddings, text_mask)
 
-        # Reshape back: (B, D*H*W, C) -> (B, C, D, H, W)
-        x_out = x_attended.reshape(B, D, H, W, C).permute(0, 4, 1, 2, 3)
+        # Reshape back: (B, D'*H'*W', C) -> (B, C, D', H', W')
+        x_out = x_attended.reshape(B, Dd, Hd, Wd, C).permute(0, 4, 1, 2, 3)
+
+        # Upsample back to original resolution if downsampled
+        if pool_k > 1:
+            x_out = F.interpolate(x_out, size=(D, H, W), mode="trilinear", align_corners=False)
 
         return x_out
 
@@ -259,6 +305,7 @@ class MultiScaleCrossAttention(nn.Module):
     Args:
         feature_sizes: List of feature sizes at each scale.
         text_dim: Dimension of text embeddings.
+        common_dim: Dimension of the shared Q/K/V attention space.
         num_heads: Number of attention heads.
         dropout: Dropout rate.
     """
@@ -267,6 +314,7 @@ class MultiScaleCrossAttention(nn.Module):
         self,
         feature_sizes: Tuple[int, ...] = (768, 384, 192, 96, 48),
         text_dim: int = 3072,
+        common_dim: int = 512,
         num_heads: int = 8,
         dropout: float = 0.1,
     ):
@@ -276,7 +324,8 @@ class MultiScaleCrossAttention(nn.Module):
             SpatialCrossAttention(
                 in_channels=feat_size,
                 text_dim=text_dim,
-                num_heads=min(num_heads, feat_size // 64),  # Ensure divisibility
+                common_dim=common_dim,
+                num_heads=num_heads,
                 dropout=dropout,
             )
             for feat_size in feature_sizes
