@@ -30,7 +30,7 @@ class DiceCELoss(nn.Module):
         softmax: bool = True,
         ce_weight: Optional[torch.Tensor] = None,
         lambda_dice: float = 1.0,
-        lambda_ce: float = 1.0,
+        lambda_ce: float = 0.5,  # spec: L = L_Dice + 0.5*L_CE
     ):
         super().__init__()
 
@@ -41,7 +41,7 @@ class DiceCELoss(nn.Module):
             include_background=include_background,
             to_onehot_y=to_onehot_y,
             softmax=softmax,
-            ce_weight=ce_weight,
+            weight=ce_weight,  # MONAI ≥1.4 renamed ce_weight → weight
             lambda_dice=lambda_dice,
             lambda_ce=lambda_ce,
         )
@@ -102,7 +102,7 @@ def get_loss_function(
     softmax: bool = True,
     ce_weight: Optional[torch.Tensor] = None,
     lambda_dice: float = 1.0,
-    lambda_ce: float = 1.0,
+    lambda_ce: float = 0.5,  # spec: L = L_Dice + 0.5*L_CE
 ) -> nn.Module:
     """Factory function to create loss function.
 
