@@ -228,7 +228,22 @@ class UCSFPDGMDataset:
 # ======================================================================
 
 def prompt_collate_fn(batch):
-    """Collate that keeps string fields (prompt, subject_id) as lists."""
+    """Collate that keeps string fields (prompt, subject_id) as lists.
+
+    Also handles the case where each dataset item is a list of dicts
+    (produced by RandCropByPosNegLabeld with num_samples > 1) by
+    flattening the nested list before collation.
+    """
+    # Flatten list-of-lists: RandCropByPosNegLabeld(num_samples=N) returns
+    # a list of N dicts per __getitem__ call; DataLoader batches those lists.
+    flat: list = []
+    for item in batch:
+        if isinstance(item, list):
+            flat.extend(item)
+        else:
+            flat.append(item)
+    batch = flat
+
     collated = {}
     for key in batch[0].keys():
         values = [d[key] for d in batch]
