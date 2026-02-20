@@ -8,6 +8,7 @@ from monai.transforms import (
     EnsureChannelFirstd,
     EnsureTyped,
     LoadImaged,
+    MapLabelValued,
     NormalizeIntensityd,
     Orientationd,
     RandCropByPosNegLabeld,
@@ -16,6 +17,15 @@ from monai.transforms import (
     RandScaleIntensityd,
     RandShiftIntensityd,
     Spacingd,
+)
+
+# UCSF-PDGM follows BraTS 2021 convention: ET is label 4 (not 3).
+# The model uses 4 output classes {0,1,2,3}. We must remap label 4 → 3
+# so CrossEntropyLoss does not crash with "Target 4 is out of bounds".
+_LABEL_REMAP = MapLabelValued(
+    keys=["label"],
+    orig_labels=[0, 1, 2, 4],
+    target_labels=[0, 1, 2, 3],
 )
 
 
@@ -36,6 +46,9 @@ def get_train_transforms(
         [
             LoadImaged(keys=["image", "label"]),
             EnsureChannelFirstd(keys=["image", "label"]),
+            # Remap BraTS ET label 4 → model class 3 (4-class output).
+            # UCSF-PDGM uses BraTS 2021 labels {0,1,2,4}; model expects {0,1,2,3}.
+            _LABEL_REMAP,
             Orientationd(keys=["image", "label"], axcodes="RAS"),
             Spacingd(
                 keys=["image", "label"],
@@ -80,6 +93,8 @@ def get_val_transforms(
         [
             LoadImaged(keys=["image", "label"]),
             EnsureChannelFirstd(keys=["image", "label"]),
+            # Remap BraTS ET label 4 → model class 3 (4-class output).
+            _LABEL_REMAP,
             Orientationd(keys=["image", "label"], axcodes="RAS"),
             Spacingd(
                 keys=["image", "label"],
