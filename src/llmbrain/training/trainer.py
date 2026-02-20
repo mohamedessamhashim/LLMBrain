@@ -1,7 +1,6 @@
 """Training loop for LLM-conditioned brain tumor segmentation."""
 
 import random
-from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -39,6 +38,10 @@ class Trainer:
         amp: Automatic mixed precision.
         scheduler: Optional LR scheduler.
         llm_encoder: Optional LLaMA encoder for text conditioning.
+        accumulation_steps: Gradient accumulation steps (effective batch = batch_size × steps).
+        grad_clip: Max gradient norm for clipping (None = disabled).
+        phase2_epoch: Epoch at which to unfreeze Swin encoder (two-phase schedule).
+                      Set to None to skip two-phase training (e.g. for baseline).
     """
 
     def __init__(
@@ -57,6 +60,9 @@ class Trainer:
         llm_encoder: Optional[nn.Module] = None,
         prompt_dropout: float = 0.15,
         prompt_permutation: bool = True,
+        accumulation_steps: int = 1,
+        grad_clip: Optional[float] = 1.0,
+        phase2_epoch: Optional[int] = 50,
     ):
         self.model = model.to(device)
         self.loss_fn = loss_fn
@@ -64,6 +70,8 @@ class Trainer:
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.device = device
+        # device_type strips index suffix (e.g. "cuda:0" → "cuda") for autocast/GradScaler
+        self.device_type = device.split(":")[0]
         self.output_dir = Path(output_dir)
         self.max_epochs = max_epochs
         self.val_interval = val_interval
@@ -72,6 +80,9 @@ class Trainer:
         self.llm_encoder = llm_encoder
         self.prompt_dropout = prompt_dropout
         self.prompt_permutation = prompt_permutation
+        self.accumulation_steps = max(1, accumulation_steps)
+        self.grad_clip = grad_clip
+        self.phase2_epoch = phase2_epoch
 
         # Setup output directories
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -81,8 +92,8 @@ class Trainer:
         # TensorBoard writer
         self.writer = SummaryWriter(log_dir=str(self.log_dir))
 
-        # Mixed precision
-        self.scaler = GradScaler(device) if amp else None
+        # Mixed precision (GradScaler and autocast both require device type, not full name)
+        self.scaler = GradScaler(self.device_type) if amp else None
 
         # Metrics
         self.dice_metric = DiceMetric(include_background=True, reduction="mean_batch")
@@ -139,14 +150,50 @@ class Trainer:
     # Training
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Two-phase training schedule
+    # ------------------------------------------------------------------
+
+    def _set_phase(self, epoch: int) -> None:
+        """Manage two-phase training schedule.
+
+        Phase 1 (epoch < phase2_epoch): Swin encoder frozen, only adapters trained.
+        Phase 2 (epoch >= phase2_epoch): All parameters unfrozen.
+
+        This protects pretrained Swin weights during early adapter warm-up and
+        then allows full fine-tuning once the cross-attention layers are stable.
+        """
+        if self.phase2_epoch is None:
+            return  # No two-phase schedule
+
+        in_phase2 = epoch >= self.phase2_epoch
+
+        for name, param in self.model.named_parameters():
+            if "swin_unetr.swinViT" in name or (
+                "swin_unetr.encoder" in name and "cross_attn" not in name
+            ):
+                param.requires_grad = in_phase2
+
+        if epoch == 0 and not in_phase2:
+            print(f"[Two-phase] Phase 1: Swin encoder frozen until epoch {self.phase2_epoch}")
+        elif epoch == self.phase2_epoch:
+            print("[Two-phase] Phase 2: Swin encoder unfrozen — fine-tuning all parameters")
+
+    # ------------------------------------------------------------------
+    # Training
+    # ------------------------------------------------------------------
+
     def train_epoch(self, epoch: int) -> float:
-        """Train for one epoch."""
+        """Train for one epoch with gradient accumulation and clipping."""
         self.model.train()
         epoch_loss = 0.0
         step = 0
+        num_batches = len(self.train_loader)
+
+        self.optimizer.zero_grad()
 
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}/{self.max_epochs}")
-        for batch_data in pbar:
+        for batch_idx, batch_data in enumerate(pbar):
             step += 1
             inputs = batch_data["image"].to(self.device)
             labels = batch_data["label"].to(self.device)
@@ -156,10 +203,9 @@ class Trainer:
             prompts = self._augment_prompts(prompts)
             text_embeddings, text_mask = self._encode_prompts(prompts)
 
-            self.optimizer.zero_grad()
-
+            # Scale loss by accumulation steps so gradients average correctly
             if self.amp:
-                with autocast(self.device):
+                with autocast(self.device_type):
                     if text_embeddings is not None:
                         outputs = self.model(
                             inputs,
@@ -168,11 +214,9 @@ class Trainer:
                         )
                     else:
                         outputs = self.model(inputs)
-                    loss = self.loss_fn(outputs, labels)
+                    loss = self.loss_fn(outputs, labels) / self.accumulation_steps
 
                 self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
             else:
                 if text_embeddings is not None:
                     outputs = self.model(
@@ -182,12 +226,34 @@ class Trainer:
                     )
                 else:
                     outputs = self.model(inputs)
-                loss = self.loss_fn(outputs, labels)
+                loss = self.loss_fn(outputs, labels) / self.accumulation_steps
                 loss.backward()
-                self.optimizer.step()
 
-            epoch_loss += loss.item()
-            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+            # Optimizer step after accumulation_steps batches (or at end of epoch)
+            is_last = batch_idx == num_batches - 1
+            if (step % self.accumulation_steps == 0) or is_last:
+                if self.amp:
+                    # Unscale before clipping so clip threshold is in original scale
+                    self.scaler.unscale_(self.optimizer)
+                    if self.grad_clip is not None:
+                        torch.nn.utils.clip_grad_norm_(
+                            [p for p in self.model.parameters() if p.requires_grad],
+                            max_norm=self.grad_clip,
+                        )
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    if self.grad_clip is not None:
+                        torch.nn.utils.clip_grad_norm_(
+                            [p for p in self.model.parameters() if p.requires_grad],
+                            max_norm=self.grad_clip,
+                        )
+                    self.optimizer.step()
+                self.optimizer.zero_grad()
+
+            # Track un-scaled loss for logging
+            epoch_loss += loss.item() * self.accumulation_steps
+            pbar.set_postfix({"loss": f"{loss.item() * self.accumulation_steps:.4f}"})
 
         epoch_loss /= step
         return epoch_loss
@@ -222,7 +288,7 @@ class Trainer:
                     predictor = self.model
 
                 if self.amp:
-                    with autocast(self.device):
+                    with autocast(self.device_type):
                         outputs = sliding_window_inference(
                             inputs,
                             roi_size=(96, 96, 96),
@@ -302,6 +368,9 @@ class Trainer:
         print(f"Output directory: {self.output_dir}")
 
         for epoch in range(self.max_epochs):
+            # Apply two-phase schedule: freeze/unfreeze Swin encoder as needed
+            self._set_phase(epoch)
+
             train_loss = self.train_epoch(epoch)
 
             self.writer.add_scalar("train/loss", train_loss, epoch)
