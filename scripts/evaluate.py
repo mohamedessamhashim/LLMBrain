@@ -28,7 +28,7 @@ import torch
 from monai.data import DataLoader, Dataset, decollate_batch
 from monai.inferers import sliding_window_inference
 from monai.transforms import AsDiscrete
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from tqdm import tqdm
 
 from llmbrain.data import UCSFPDGMDataset, get_val_transforms
@@ -67,6 +67,8 @@ def main():
     else:
         device = "cpu"
     print(f"Using device: {device}")
+    # device_type strips index suffix (e.g. "cuda:0" → "cuda") for autocast
+    device_type = device.split(":")[0]
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -116,6 +118,7 @@ def main():
             out_channels=model_config.get("out_channels", 4),
             feature_size=model_config.get("feature_size", 48),
             text_dim=text_dim,
+            cross_attn_common_dim=model_config.get("cross_attn_common_dim", 512),
             cross_attn_heads=model_config.get("cross_attn_heads", 8),
             cross_attn_dropout=model_config.get("cross_attn_dropout", 0.1),
             pretrained_vision=False,
@@ -159,15 +162,18 @@ def main():
             if llm_encoder is not None and prompts is not None:
                 text_embeddings, text_mask = llm_encoder.get_sequence_embeddings(prompts)
 
-            # Build predictor
+            # Build predictor.  sliding_window_inference may call the predictor
+            # with sw_batch_size > 1 patches; expand text embeddings to match.
             if text_embeddings is not None:
                 def _predict(x, te=text_embeddings, tm=text_mask):
-                    return model(x, text_embeddings=te, text_mask=tm)
+                    te_exp = te.expand(x.shape[0], -1, -1)
+                    tm_exp = tm.expand(x.shape[0], -1) if tm is not None else None
+                    return model(x, text_embeddings=te_exp, text_mask=tm_exp)
                 predictor = _predict
             else:
                 predictor = model
 
-            with autocast():
+            with autocast(device_type):
                 outputs = sliding_window_inference(
                     inputs,
                     roi_size=(96, 96, 96),
