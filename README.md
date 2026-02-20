@@ -343,5 +343,3 @@ Download from: https://www.bic.mni.mcgill.ca/ServicesAtlases/ICBM152NLin2009
 ---
 
 ## License
-
-MIT License
