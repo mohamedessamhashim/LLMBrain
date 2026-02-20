@@ -44,6 +44,8 @@ training:
   ce_weight: [0.5, 1.0, 1.0, 1.5]  # Class weights for CE: BG, NCR, ED, ET
   prompt_dropout: 0.15         # Probability of replacing prompt with generic fallback
   prompt_permutation: true     # Randomly shuffle clinical field order
+  accumulation_steps: 8        # Gradient accumulation (effective batch = 1 × 8 = 8)
+  grad_clip: 1.0               # Max gradient norm (prevents explosion in cross-attn)
 
 # Output directory
 output_dir: "./outputs/llm_conditioned"
