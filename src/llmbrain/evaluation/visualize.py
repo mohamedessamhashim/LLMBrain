@@ -126,7 +126,7 @@ def plot_triplanar_view(
     plt.tight_layout()
 
     if save_path is not None:
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
 
     return fig
 
@@ -210,7 +210,7 @@ def plot_comparison_grid(
     plt.tight_layout()
 
     if save_path is not None:
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
 
     return fig
 
@@ -261,7 +261,7 @@ def plot_dice_boxplot(
     plt.tight_layout()
 
     if save_path is not None:
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
 
     return fig
 
