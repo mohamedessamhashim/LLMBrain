@@ -30,6 +30,8 @@ training:
   val_interval: 5
   amp: true               # Automatic mixed precision
   num_workers: 4
+  accumulation_steps: 1   # No accumulation needed; batch_size=2 is sufficient
+  grad_clip: 1.0          # Max gradient norm
 
 # Output directory
 output_dir: "./outputs/baseline"
