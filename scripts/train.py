@@ -8,7 +8,9 @@ Supports two modes:
 """
 
 import argparse
+import random
 
+import numpy as np
 import torch
 
 from llmbrain.data import get_train_val_loaders
@@ -42,6 +44,14 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # ---- Reproducibility ----
+    SEED = 42
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
 
     # ---- Config ----
     config = load_config(args.config)
@@ -178,6 +188,10 @@ def main():
         print(f"Resumed from checkpoint at epoch {start_epoch}")
 
     # ---- Trainer ----
+    # Two-phase schedule applies only to LLM-conditioned model (has cross-attn adapters).
+    # For the baseline (vision-only), skip phase schedule so all params train from epoch 0.
+    phase2_epoch = 50 if use_llm else None
+
     trainer = Trainer(
         model=model,
         loss_fn=loss_fn,
@@ -193,6 +207,9 @@ def main():
         llm_encoder=llm_encoder,
         prompt_dropout=training_config.get("prompt_dropout", 0.15),
         prompt_permutation=training_config.get("prompt_permutation", True),
+        accumulation_steps=training_config.get("accumulation_steps", 1),
+        grad_clip=training_config.get("grad_clip", 1.0),
+        phase2_epoch=phase2_epoch,
     )
 
     trainer.train()
