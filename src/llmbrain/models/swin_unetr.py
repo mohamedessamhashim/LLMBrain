@@ -185,15 +185,19 @@ class LLMConditionedSwinUNETR(nn.Module):
 
         _load_pretrained(self.swin_unetr, pretrained_vision)
 
-        # Cross-attention layers at each decoder stage.
-        # Swin UNETR decoder stages have these channel counts (feature_size=48):
-        #   enc0: 48,  enc1: 48,  enc2: 96,  enc3: 192,  bottleneck: 768
-        # These correspond to the encoder outputs fed as skip connections.
+        # Cross-attention layers injected at encoder skip connections.
+        # Channel counts for Swin UNETR with feature_size=48:
+        #   enc1: 48  (encoder2 output, hs[0])
+        #   enc2: 96  (encoder3 output, hs[1])
+        #   enc3: 192 (encoder4 output, hs[2])
+        #   bottleneck: 768 (encoder10 output, hs[4])
+        # NOTE: cross-attention is applied to enc1/enc2/enc3 (skip connections),
+        # NOT to the decoder stage outputs — so channels must match the encoder.
         decoder_channels = [
             feature_size * 16,  # bottleneck: 768
-            feature_size * 8,   # dec3 input: 384
-            feature_size * 4,   # dec2 input: 192
-            feature_size * 2,   # dec1 input: 96
+            feature_size * 4,   # enc3 skip: 192
+            feature_size * 2,   # enc2 skip: 96
+            feature_size * 1,   # enc1 skip: 48
         ]
 
         self.cross_attn_layers = nn.ModuleList()
@@ -208,10 +212,12 @@ class LLMConditionedSwinUNETR(nn.Module):
                 )
             )
 
-        # Gating parameters: learnable scalars initialised near zero so the
-        # model starts close to the pretrained vision-only behaviour.
+        # Gating parameters: learnable scalars initialised at exactly zero so the
+        # model starts as pure vision-only (tanh(0) = 0, so no cross-attn at init).
+        # tanh is used instead of sigmoid: tanh(0) = 0 exactly, and tanh gives
+        # symmetric ±1 range which avoids the sigmoid's non-zero floor problem.
         self.gate_params = nn.ParameterList([
-            nn.Parameter(torch.full((1,), -5.0)) for _ in decoder_channels
+            nn.Parameter(torch.zeros(1)) for _ in decoder_channels
         ])
 
     def forward(
@@ -243,23 +249,25 @@ class LLMConditionedSwinUNETR(nn.Module):
 
         # --- Cross-attention conditioning ---
         if text_embeddings is not None:
-            # Condition bottleneck and skip connections
-            gate0 = torch.sigmoid(self.gate_params[0])
+            # Condition bottleneck and skip connections.
+            # Gates use tanh so gate_param=0 → gate=tanh(0)=0 (exactly no conditioning
+            # at initialisation), growing smoothly as the gate parameter is learned.
+            gate0 = torch.tanh(self.gate_params[0])
             bottleneck = bottleneck + gate0 * self.cross_attn_layers[0](
                 bottleneck, text_embeddings, text_mask
             )
 
-            gate1 = torch.sigmoid(self.gate_params[1])
+            gate1 = torch.tanh(self.gate_params[1])
             enc3 = enc3 + gate1 * self.cross_attn_layers[1](
                 enc3, text_embeddings, text_mask
             )
 
-            gate2 = torch.sigmoid(self.gate_params[2])
+            gate2 = torch.tanh(self.gate_params[2])
             enc2 = enc2 + gate2 * self.cross_attn_layers[2](
                 enc2, text_embeddings, text_mask
             )
 
-            gate3 = torch.sigmoid(self.gate_params[3])
+            gate3 = torch.tanh(self.gate_params[3])
             enc1 = enc1 + gate3 * self.cross_attn_layers[3](
                 enc1, text_embeddings, text_mask
             )
